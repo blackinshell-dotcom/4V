@@ -6,6 +6,8 @@ import { HeroOdometer } from './components/HeroOdometer';
 import { ThreatAlertBox } from './components/ThreatAlertBox';
 import { ComplianceBox } from './components/ComplianceBox';
 
+const STATE_API = "/api/state";
+
 const App: React.FC = () => {
   // --- Core State ---
   const [totalOdometer, setTotalOdometer] = useState<number>(22845);
@@ -26,9 +28,29 @@ const App: React.FC = () => {
   
   const stateRef = useRef<MaintenanceState>({ totalOdometer, items, history, licenseExpiry, taxExpiry });
 
+  // ---- Sync control refs ----
+  const lastServerSyncRef = useRef<string | null>(null);
+  const isApplyingRemoteRef = useRef(false);
+
   useEffect(() => {
     stateRef.current = { totalOdometer, items, history, licenseExpiry, taxExpiry };
   }, [totalOdometer, items, history, licenseExpiry, taxExpiry]);
+
+  const pushStateToServer = useCallback(async (state: MaintenanceState) => {
+    try {
+      const updated_at = new Date().toISOString();
+
+      await fetch(STATE_API, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ state, updated_at }),
+      });
+
+      lastServerSyncRef.current = updated_at;
+    } catch (e) {
+      console.error("Push failed", e);
+    }
+  }, []);
 
   // --- Persistence ---
   useEffect(() => {
@@ -50,7 +72,47 @@ const App: React.FC = () => {
   useEffect(() => {
     const state = { totalOdometer, items, history, licenseExpiry, taxExpiry };
     localStorage.setItem('moto_state', JSON.stringify(state));
-  }, [totalOdometer, items, history, licenseExpiry, taxExpiry]);
+
+    if (!isApplyingRemoteRef.current) {
+      pushStateToServer(state);
+    }
+  }, [totalOdometer, items, history, licenseExpiry, taxExpiry, pushStateToServer]);
+
+  // --- Auto refresh pull (polling) ---
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(STATE_API);
+        const data = await res.json();
+
+        if (!data?.record) return;
+
+        const serverUpdatedAt = data.record.updated_at;
+
+        if (serverUpdatedAt && serverUpdatedAt !== lastServerSyncRef.current) {
+          isApplyingRemoteRef.current = true;
+
+          const remote = data.record.state as MaintenanceState;
+
+          setTotalOdometer(remote.totalOdometer);
+          setItems(remote.items);
+          setHistory(remote.history);
+          setLicenseExpiry(remote.licenseExpiry);
+          setTaxExpiry(remote.taxExpiry);
+
+          lastServerSyncRef.current = serverUpdatedAt;
+
+          setTimeout(() => {
+            isApplyingRemoteRef.current = false;
+          }, 0);
+        }
+      } catch (e) {
+        console.error("Pull failed", e);
+      }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, []);
 
   // --- Undo Logic ---
   const saveSnapshot = () => {
